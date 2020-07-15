@@ -1,0 +1,2261 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Jun 18 11:03:09 2017
+
+@author: 49603
+"""
+
+
+import tensorflow as tf
+import numpy as np
+from sklearn.metrics import recall_score
+from sklearn.metrics import cohen_kappa_score
+from sklearn.metrics import accuracy_score
+import time
+from PIL import Image
+import scipy.io as sio
+import matplotlib.pyplot as plt
+import os
+import cv2
+from cell import ConvLSTMCell
+from pre_color import plot_label
+ 
+
+from gan_model import *
+from data_indian import *
+from sub_function import *
+
+os.environ["CUDA_VISIBLE_DEVICES"]='1'
+
+
+
+length=145#图像长度
+height=27
+width=27
+c_dim=20#d的输入通道
+batch_size=128
+'''z_dim=116#g的输入通道'''
+z_dim=110#g的输入通道
+learning_rate=0.01
+'''epoch=1400'''
+epoch=1400
+'''dim_out=16#输出通道#注意是否为输出类别个数'''
+dim_out=10#????输出通道#注意是否为输出类别个数
+dropout=0.5
+num=10#G的训练次数
+
+'''placeholder'''#占位符
+x_real = tf.placeholder(tf.float32,[None,height,width,c_dim], name='real_images')#真实数据
+y_real= tf.placeholder(tf.float32, [None, dim_out],name='real_labels')#真实数据标签
+z=tf.placeholder(tf.float32,[batch_size,z_dim],name='noise')#定义变量的占位符
+prob=tf.placeholder(tf.float32)
+lam=tf.placeholder(tf.float32)
+
+'''prepare the data and label'''
+data_x,data_y,train_number,test_x,test_y,class_mean,data,extracted_pixel_ind,extracted_unlpixel_ind=get_data(flag=1)#从原数据中获得真实数据
+#data_x,data_y,train_number,test_x,test_y,data,extracted_pixel_ind,extracted_unlpixel_ind=get_data(flag=1)
+print(np.shape(extracted_pixel_ind))
+noise = np.random.uniform(-1, 1, [batch_size,100]).astype(np.float32)#获得噪声数据-1到1之间，形状为[64,100]
+
+'''label=np.array([1/16,1/16,1/16,1/16,1/16,1/16,1/16,1/16,1/16,1/+,1/16,1/16,1/16,1/16,1/16,1/16]).astype('float32')#噪声数据赋予标签1/16'''
+#label=np.array([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]).astype('float32')#噪声数据赋予标签，希望迪17类判别为1
+label=np.array([0,0,0,0,0,0,0,0,0,1]).astype('float32')
+y_fake=np.tile(label,[batch_size,1])#将label重复[64,1]次，作为一个数组形式返回
+
+#cancat spe+spa
+with tf.variable_scope("discriminator") as scope:
+    y_real_logit,z_sper,d0,d1,d2,d3=discriminator(x_real)
+    G = generator(z,z_sper,d0,d1,d2,d3)#真实数据输入D得到预测标签
+    scope.reuse_variables()
+    y_fake_logit,z_spef,f0,f1,f2,f3=discriminator(G)#G(z)输入D的到预测标签
+    
+  
+
+#temp1=tf.reshape(x_real,[-1,height*width*c_dim])
+#temp2=tf.reshape(G,[-1,height*width*c_dim])
+#g_l2_loss=tf.reduce_mean(tf.losses.mean_squared_error(temp1,temp2))
+d_loss_real = tf.reduce_mean(cross_entropy( y_real_logit, y_real))#计算一个张量的各维度的元素的均值，该张量为真是标签和预测标签的交叉熵
+d_loss_fake = tf.reduce_mean(cross_entropy(y_fake_logit,y_fake))#同上，此时为fake数据的真实标签与预测标签的交叉熵
+d_loss =d_loss_real +d_loss_fake#得到D总的损失函数
+#tf.multiply(tf.add(0.5,tf.multiply(lam,1/1600)),d_loss_fake)
+g_loss = tf.reduce_mean(cross_entropy(y_fake_logit, y_real))#G的损失函数为生成数据的预测标签与真实数据真实标签之间的交叉熵
+#g_loss=g_tf_loss+5*g_l2_loss
+saver = tf.train.Saver()#保存和恢复变量
+
+var1 = tf.trainable_variables()[0:30]#返回可训练=True的所有变量。返回所有当前计算图中 在获取变量时未标记 trainable=False 的变量集合
+var2 = tf.trainable_variables()[30:]#改动取决于结果代码中变量的个数
+print(var1)
+print(var2)
+g_optim = tf.train.RMSPropOptimizer(learning_rate=0.035).minimize(g_loss,var_list=var2)#梯度优化算法
+d_optim = tf.train.RMSPropOptimizer(learning_rate=0.01).minimize(d_loss,var_list=var1)
+
+correct_prediction=tf.equal(tf.argmax(y_real_logit,1),tf.argmax(y_real,1))#通过比较真实数据的真是标签和预测标签是否相等，来求准确度。
+#找到给定的张量tensor中在指定轴axis上的最大值/最小值的位置。0表示按列，1表示按行
+#判断两个tensor是否每个元素都相等。返回一个格式为bool的tensor,布尔型是指值只有两个:false(假)和true(真)。且false的序号为0，true的序号是1
+accuracy=tf.reduce_mean(tf.cast(correct_prediction,tf.float32)) #将一个张量转换为一个新类型loat32，并求平均值，得到精度
+
+init = tf.global_variables_initializer()#返回初始化全局变量的Op(节点),即初始化时的操作节点
+
+
+# Launch the graph
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+with tf.Session() as sess:
+    writer=tf.summary.FileWriter("log/",sess.graph)
+    sess.run(init)
+    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+    variables_names = [v.name for v in tf.trainable_variables()]
+    values = sess.run(variables_names)
+    for k, v in zip(variables_names, values):
+        print("Variable: ", k)
+        print("Shape: ", v.shape)
+   
+    sample=np.array([])
+    label=np.array([])
+    epoch_count=count=1
+    acc=0  
+    index=batch_size
+    time_train_start=time.clock()
+    while epoch_count<=epoch:
+        while index<=len(data_x):
+            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index].astype(np.float32)
+            batch_z=np.hstack((noise,batch_y)).astype(np.float32)#将noise和batch—y水平排列为堆栈数组
+            
+            #batch_y=batch_y*0.9
+            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            for i in range(num):                                                                                                                                              
+                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+            if count%400==0:
+                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+        
+            index=index+batch_size
+            count=count+1
+            fake_sam=np.array([]).reshape([-1,27,27,20])
+            real_sam=np.array([]).reshape([-1,27,27,20])
+            if(epoch_count>980):
+                g = sess.run(G,feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z})
+                fake_sam=np.vstack((fake_sam,g))
+                real_sam=np.vstack((real_sam,batch_x))
+        index=batch_size
+        # Shuffle the data
+        perm = np.arange(len(data_x))
+        np.random.shuffle(perm)
+        data_x = data_x[perm]
+        data_y = data_y[perm]
+        # Start next epoch
+        
+        epoch_count=epoch_count+1
+    time_train_end=time.clock()
+    print("Optimization Finished!")
+    saver.save(sess, 'log/ckpt')
+    time_test_start=time.clock()
+    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+    y_pred=contrary_one_hot(y_logit).astype('int32')
+    y_true=contrary_one_hot(test_y).astype('int32')
+    oa=accuracy_score(y_true,y_pred)
+    per_class_acc=recall_score(y_true,y_pred,average=None)
+    aa=np.mean(per_class_acc)
+    kappa=cohen_kappa_score(y_true,y_pred)
+    time_test_end=time.clock()
+    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+
+
+    
+    
+    
+'''    
+    temp=y_real_logit.eval(feed_dict={x_real: data})
+    
+    #temp=np.vstack((temp1,temp2))
+    y_pred=contrary_one_hot(temp).astype('int32')
+
+    plot_to_label=np.zeros(21025)
+    for i in range(len(y_pred)):
+        plot_to_label[extracted_pixel_ind[i]]=y_pred[i]
+    for j in extracted_unlpixel_ind:
+        plot_to_label[j]=0
+    plot_to_label=np.reshape(plot_to_label,[145,145])
+#    plt.imshow(plot_to_label)
+    
+    sio.savemat('plot_label0.mat',{'plot_label':plot_to_label})
+    
+    p = plot_label('Indian_pines')
+    img = p.plot_color(plot_to_label)
+    #        plt.show(img)
+    plt.imsave('Indian_test',img)
+
+    for i in range(len(fake_sam)):
+        plt.imshow(fake_sam[0][:,:,0])
+        #print(fake_sam[0][:,:,0])
+        plt.imsave('fake_{}'.format(i),fake_sam[i][:,:,0])
+        plt.imsave('real_{}'.format(i),real_sam[i][:,:,0])
+'''
+    
+#将实验结果保存在txt文件中
+write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+f = open(os.getcwd()+'/2020.1.14 （Pavia 3%）实验结果.txt','a')
+f.writelines(write_content)
+f.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##
+###大图
+##plot_model = plot_label(y_pred,'Indian_pines')
+##img = plot_model.img
+##cv2.imwrite('test.tif',img)
+###temp=y_real_logit.eval(feed_dict={x_real: data})
+###
+####temp1=y_.eval(feed_dict={x: data_all})
+###y_pred=contrary_one_hot(temp).astype('int32')
+###
+###img = plot_model.plot_color(y_pred)
+##
+##raise NameError
+#
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#'''
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#'''    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/2019.6.17gan+attention实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#'''
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
+#
+#
+#
+#with tf.Session() as sess:
+#    writer=tf.summary.FileWriter("log/",sess.graph)
+#    sess.run(init)
+#    #saver.restore(sess,"G:\FXL\GAN\GAN17-RNN -6-g1rnn\log/ckpt")
+#    variables_names = [v.name for v in tf.trainable_variables()]
+#    values = sess.run(variables_names)
+#    for k, v in zip(variables_names, values):
+#        print("Variable: ", k)
+#        print("Shape: ", v.shape)
+#   
+#    sample=np.array([])
+#    label=np.array([])
+#    epoch_count=count=1
+#    acc=0  
+#    index=batch_size
+#    time_train_start=time.clock()
+#    while epoch_count<=epoch:
+#        while index<=len(data_x):
+#            batch_x,batch_y=data_x[index-batch_size:index],data_y[index-batch_size:index]
+#            batch_z=np.hstack((noise,batch_y))#将noise和batch—y水平排列为堆栈数组
+#            
+#            #batch_y=batch_y*0.9
+#            _,dls,loss,lossf,acc=sess.run([d_optim,d_loss,d_loss_real,d_loss_fake,accuracy],feed_dict={ x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            for i in range(num):                                                                                                                                              
+#                _,gls=sess.run([g_optim,g_loss],feed_dict={x_real:batch_x,y_real:batch_y,z: batch_z,lam:epoch_count})
+#            if count%400==0:
+#                print("step="+str(count)+",d_Loss= " + "{:.6f}".format(dls) + ",g_loss=" + "{:.6f}".format(gls)+ ",d_Loss_real= " + "{:.6f}".format(loss) + ",d_Loss_fake= " + "{:.6f}".format(lossf) + ",accuracy=" + "{:.6f}".format(acc))
+#                print(accuracy.eval(feed_dict={x_real: test_x, y_real: test_y,lam:epoch_count}))
+#        
+#            index=index+batch_size
+#            count=count+1
+#        index=batch_size
+#        # Shuffle the data
+#        perm = np.arange(len(data_x))
+#        np.random.shuffle(perm)
+#        data_x = data_x[perm]
+#        data_y = data_y[perm]
+#        # Start next epoch
+#        epoch_count=epoch_count+1
+#    time_train_end=time.clock()
+#    print("Optimization Finished!")
+#    saver.save(sess, 'log/ckpt')
+#    time_test_start=time.clock()
+#    y_logit=y_real_logit.eval(feed_dict={x_real: test_x, y_real: test_y})
+#    y_pred=contrary_one_hot(y_logit).astype('int32')
+#    y_true=contrary_one_hot(test_y).astype('int32')
+#    oa=accuracy_score(y_true,y_pred)
+#    per_class_acc=recall_score(y_true,y_pred,average=None)
+#    aa=np.mean(per_class_acc)
+#    kappa=cohen_kappa_score(y_true,y_pred)
+#    time_test_end=time.clock()
+#    print(oa,aa,kappa,per_class_acc,time_train_end-time_train_start,time_test_end-time_test_start)
+#
+#
+#
+#    temp=y_real_logit.eval(feed_dict={x_real: data})
+#    
+#    #temp=np.vstack((temp1,temp2))
+#    y_pred=contrary_one_hot(temp).astype('int32')
+#    
+#    print(np.shape(y_pred))
+#    plot_label=np.zeros(21025)
+#    for i in range(len(y_pred)):
+#        plot_label[extracted_pixel_ind[i]]=y_pred[i]
+#    for j in extracted_unlpixel_ind:
+#        plot_label[j]=0
+#    plot_label=np.reshape(plot_label,[145,145])
+#    plt.imshow(plot_label)
+#    sio.savemat('plot_label0.mat',{'plot_label':plot_label})
+#    
+#    
+##将实验结果保存在txt文件中
+#write_content='\n'+'oa:'+str(oa)+' aa:'+str(aa)+' kappa:'+str(kappa)+'\n'+'per_class_acc:'+str(per_class_acc)+'\n'+'train_time:'+str(time_train_end-time_train_start)+' test_time:'+str(time_test_end-time_test_start)+'\n'
+#f = open(os.getcwd()+'/实验结果.txt','a')
+#f.writelines(write_content)
+#f.close()
